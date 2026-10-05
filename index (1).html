@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Folder Organizer</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1c1f24;--muted:#6b7280;--line:#e3e6ea;--accent:#2563eb;--danger:#dc2626}
+@media(prefers-color-scheme:dark){:root{--bg:#14161a;--card:#1d2026;--text:#e8eaed;--muted:#9aa0a9;--line:#2b2f37;--accent:#5b8cff;--danger:#f26b6b}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh}
+aside{width:260px;background:var(--card);border-right:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:10px}
+aside h1{font-size:18px;margin:0 0 4px}
+main{flex:1;padding:24px;max-width:900px}
+input,button{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+button{cursor:pointer;background:var(--accent);color:#fff;border:0}
+button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+button.del{background:transparent;color:var(--danger);border:0;padding:4px 8px}
+.row{display:flex;gap:6px}.row input{flex:1;min-width:0}
+.folder{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;cursor:pointer}
+.folder:hover{background:var(--bg)}.folder.active{background:var(--accent);color:#fff}
+.folder small{opacity:.7}
+.add{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+.add input[type=text]{flex:1;min-width:140px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+th{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.05em}
+td a{color:var(--accent);text-decoration:none;word-break:break-all;cursor:pointer}
+.empty{color:var(--muted);padding:30px;text-align:center}
+.badge{font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid var(--line);color:var(--muted);margin-right:6px}
+#auth{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:10}
+#auth .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px;width:min(360px,92vw);display:flex;flex-direction:column;gap:10px}
+#auth h2{margin:0 0 6px}#err{color:var(--danger);font-size:13px;min-height:16px}
+.hidden{display:none!important}
+@media(max-width:700px){body{flex-direction:column}aside{width:100%}}
+</style>
+</head>
+<body>
+<div id="auth">
+  <div class="box">
+    <h2>📁 Folder Organizer</h2>
+    <input id="email" type="email" placeholder="Email" autocomplete="email">
+    <input id="pass" type="password" placeholder="Password (min 6 chars)" autocomplete="current-password">
+    <button id="signin">Sign in</button>
+    <button class="ghost" id="signup">Create account</button>
+    <button class="ghost" id="google">Continue with Google</button>
+    <div id="err"></div>
+  </div>
+</div>
+
+<aside class="hidden" id="side">
+  <h1>📁 Folders</h1>
+  <div class="row"><input id="newFolder" placeholder="New folder name"><button id="addFolder">+</button></div>
+  <div id="folders"></div>
+  <small id="who" style="margin-top:auto;color:var(--muted);word-break:break-all"></small>
+  <button class="ghost" id="signout">Sign out</button>
+</aside>
+<main class="hidden" id="mainEl">
+  <h2 id="title">Select or create a folder</h2>
+  <div id="content"></div>
+</main>
+
+<script type="module">
+// ======== 1) PASTE YOUR FIREBASE CONFIG HERE ========
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  appId: "YOUR_APP_ID"
+};
+// =====================================================
+
+const V = "10.12.2", G = `https://www.gstatic.com/firebasejs/${V}/`;
+const {initializeApp} = await import(G+"firebase-app.js");
+const A = await import(G+"firebase-auth.js");
+const F = await import(G+"firebase-firestore.js");
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const MAX_PDF = 5 * 1024 * 1024, CHUNK = 700000;
+
+if(firebaseConfig.apiKey === "YOUR_API_KEY"){
+  $('err').textContent = "Add your Firebase config in index.html first.";
+  throw new Error("Firebase config missing");
+}
+const app = initializeApp(firebaseConfig);
+const auth = A.getAuth(app);
+const db = F.initializeFirestore(app, {localCache: F.persistentLocalCache({tabManager: F.persistentMultipleTabManager()})});
+
+let uid = null, folders = [], items = [], current = null, unsubs = [];
+const col = n => F.collection(db, 'users', uid, n);
+const ref = (n,id) => F.doc(db, 'users', uid, n, id);
+
+// ---------- Auth ----------
+const msg = e => $('err').textContent = (e.code||'').replace('auth/','').replace(/-/g,' ') || e.message;
+const creds = () => [$('email').value.trim(), $('pass').value];
+$('signin').onclick = () => A.signInWithEmailAndPassword(auth, ...creds()).catch(msg);
+$('signup').onclick = () => A.createUserWithEmailAndPassword(auth, ...creds()).catch(msg);
+$('google').onclick = () => A.signInWithPopup(auth, new A.GoogleAuthProvider()).catch(msg);
+$('pass').onkeydown = e => { if(e.key==='Enter') $('signin').click(); };
+$('signout').onclick = () => A.signOut(auth);
+
+A.onAuthStateChanged(auth, user => {
+  unsubs.forEach(u=>u()); unsubs = [];
+  if(!user){
+    uid = null; folders = []; items = []; current = null;
+    $('auth').classList.remove('hidden'); $('side').classList.add('hidden'); $('mainEl').classList.add('hidden');
+    return;
+  }
+  uid = user.uid; $('err').textContent = '';
+  $('who').textContent = user.email || 'Signed in';
+  $('auth').classList.add('hidden'); $('side').classList.remove('hidden'); $('mainEl').classList.remove('hidden');
+  unsubs.push(F.onSnapshot(col('folders'), s => { folders = s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.created||0)-(b.created||0)); render(); }));
+  unsubs.push(F.onSnapshot(col('items'),   s => { items   = s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.created||0)-(b.created||0)); render(); }));
+});
+
+// ---------- Render ----------
+function render(){
+  if(current && !folders.find(f=>f.id===current)) current = null;
+  $('folders').innerHTML = folders.map(f=>{
+    const n = items.filter(i=>i.folderId===f.id).length;
+    return `<div class="folder ${f.id===current?'active':''}" data-id="${f.id}">
+      <span>📁 ${esc(f.name)} <small>(${n})</small></span>
+      <span><button class="del" data-ren="${f.id}" style="color:inherit">✎</button><button class="del" data-del="${f.id}" style="color:inherit">✕</button></span></div>`;
+  }).join('') || '<div class="empty">No folders yet</div>';
+  const f = folders.find(x=>x.id===current);
+  if(!f){ $('title').textContent = 'Select or create a folder'; $('content').innerHTML = ''; return; }
+  $('title').textContent = '📁 ' + f.name;
+  const list = items.filter(i=>i.folderId===current);
+  const keep = ['iTitle','iLink'].map(id => $(id)?.value || '');
+  $('content').innerHTML = `
+    <div class="add">
+      <input type="text" id="iTitle" placeholder="Title">
+      <input type="text" id="iLink" placeholder="Paste a link (https://...)">
+      <button id="addLink">Add link</button>
+      <button class="ghost" id="pickPdf">Attach PDF (max 5 MB)</button>
+      <input type="file" id="pdfFile" accept="application/pdf" multiple hidden>
+    </div>
+    ${list.length ? `<table><thead><tr><th>Title</th><th>Link / PDF</th><th></th></tr></thead><tbody>
+      ${list.map(i=>`<tr><td>${esc(i.title)}</td>
+        <td>${i.type==='pdf'
+          ? `<span class="badge">PDF</span><a data-open="${i.id}">${esc(i.fileName)}</a> · <a data-dl="${i.id}">download</a>`
+          : `<span class="badge">LINK</span><a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.url)}</a>`}</td>
+        <td><button class="del" data-edit="${i.id}" style="color:var(--muted)">✎</button><button class="del" data-rm="${i.id}">✕</button></td></tr>`).join('')}
+      </tbody></table>` : '<div class="empty">This folder is empty. Add a link or attach a PDF.</div>'}`;
+  $('iTitle').value = keep[0]; $('iLink').value = keep[1];
+}
+
+// ---------- Actions ----------
+$('addFolder').onclick = async () => {
+  const name = $('newFolder').value.trim(); if(!name) return;
+  const r = await F.addDoc(col('folders'), {name, created: Date.now()});
+  current = r.id; $('newFolder').value = '';
+};
+$('newFolder').onkeydown = e => { if(e.key==='Enter') $('addFolder').click(); };
+
+const chunksOf = async id => (await F.getDocs(F.query(col('chunks'), F.where('itemId','==',id)))).docs;
+async function removeItem(id){
+  const b = F.writeBatch(db);
+  (await chunksOf(id)).forEach(d=>b.delete(d.ref)); b.delete(ref('items',id));
+  await b.commit();
+}
+async function pdfBlob(i){
+  const parts = (await chunksOf(i.id)).map(d=>d.data()).sort((a,b)=>a.n-b.n).map(c=>c.data).join('');
+  const bin = atob(parts), u = new Uint8Array(bin.length);
+  for(let k=0;k<bin.length;k++) u[k] = bin.charCodeAt(k);
+  return new Blob([u], {type:'application/pdf'});
+}
+const toB64 = f => new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(f)});
+
+$('folders').onclick = async e => {
+  const t = e.target;
+  if(t.dataset.del){
+    e.stopPropagation();
+    if(!confirm('Delete this folder and everything inside?')) return;
+    for(const i of items.filter(i=>i.folderId===t.dataset.del)) await removeItem(i.id);
+    return F.deleteDoc(ref('folders', t.dataset.del));
+  }
+  if(t.dataset.ren){
+    e.stopPropagation();
+    const f = folders.find(x=>x.id===t.dataset.ren), n = prompt('Rename folder', f.name);
+    if(n && n.trim()) F.updateDoc(ref('folders', f.id), {name:n.trim()});
+    return;
+  }
+  const el = t.closest('.folder'); if(el){ current = el.dataset.id; render(); }
+};
+
+$('content').onclick = async e => {
+  const t = e.target, find = id => items.find(i=>i.id===id);
+  if(t.id==='addLink'){
+    let url = $('iLink').value.trim(); if(!url) return;
+    if(!/^[a-z]+:\/\//i.test(url)) url = 'https://' + url;
+    await F.addDoc(col('items'), {folderId:current, type:'link', title:$('iTitle').value.trim()||url, url, created:Date.now()});
+    $('iTitle').value = $('iLink').value = '';
+  }
+  if(t.id==='pickPdf') $('pdfFile').click();
+  if(t.dataset.open){ const i=find(t.dataset.open); const b=await pdfBlob(i); if(!window.open(URL.createObjectURL(b),'_blank')) download(b,i.fileName); }
+  if(t.dataset.dl){ const i=find(t.dataset.dl); download(await pdfBlob(i), i.fileName); }
+  if(t.dataset.rm && confirm('Remove this item?')) removeItem(t.dataset.rm);
+  if(t.dataset.edit){ const i=find(t.dataset.edit), n=prompt('Edit title', i.title); if(n&&n.trim()) F.updateDoc(ref('items',i.id), {title:n.trim()}); }
+};
+$('content').onchange = async e => {
+  if(e.target.id!=='pdfFile') return;
+  const files = [...e.target.files], typed = $('iTitle').value.trim();
+  for(const file of files){
+    if(file.size > MAX_PDF){ alert(`${file.name} is over 5 MB and was skipped.`); continue; }
+    const data = await toB64(file), iref = F.doc(col('items')), b = F.writeBatch(db);
+    const n = Math.ceil(data.length / CHUNK);
+    for(let k=0;k<n;k++) b.set(F.doc(col('chunks')), {itemId:iref.id, n:k, data:data.slice(k*CHUNK,(k+1)*CHUNK)});
+    b.set(iref, {folderId:current, type:'pdf', title:(files.length===1&&typed)||file.name.replace(/\.pdf$/i,''), fileName:file.name, size:file.size, created:Date.now()});
+    try{ await b.commit(); }catch(err){ alert('Upload failed: '+err.message); }
+  }
+  $('iTitle').value = '';
+};
+function download(blob, name){
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+if('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
