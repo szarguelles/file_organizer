@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Folder Organizer</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--text:#1c1f24;--muted:#6b7280;--line:#e3e6ea;--accent:#2563eb;--danger:#dc2626}
@@ -30,95 +30,91 @@ td a{color:var(--accent);text-decoration:none;word-break:break-all;cursor:pointe
 .empty{color:var(--muted);padding:30px;text-align:center}
 .badge{font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid var(--line);color:var(--muted);margin-right:6px}
 @media(max-width:700px){body{flex-direction:column}aside{width:100%}}
+#auth{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:10}
+#auth .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px;width:min(360px,92vw);display:flex;flex-direction:column;gap:10px}
+#auth h2{margin:0 0 6px}#err{font-size:13px;min-height:16px;color:var(--danger)}
+.hidden{display:none!important}
 </style>
 </head>
 <body>
-<aside>
+<div id="auth">
+  <div class="box">
+    <h2>📁 Folder Organizer</h2>
+    <input id="email" type="email" placeholder="Email" autocomplete="email">
+    <input id="pass" type="password" placeholder="Password (min 6 chars)" autocomplete="current-password">
+    <button id="signin">Sign in</button>
+    <button class="ghost" id="signup">Create account</button>
+    <div id="err"></div>
+  </div>
+</div>
+<aside class="hidden" id="side">
   <h1>📁 Folders</h1>
   <div class="row"><input id="newFolder" placeholder="New folder name"><button id="addFolder">+</button></div>
   <div id="folders"></div>
-  <button class="ghost" id="exportBtn" style="margin-top:auto">Export backup</button>
-  <button class="ghost" id="importBtn">Import backup</button>
-  <input type="file" id="importFile" accept=".json" hidden>
+  <small id="who" style="margin-top:auto;color:var(--muted);word-break:break-all"></small>
+  <button class="ghost" id="signout">Sign out</button>
 </aside>
-<main>
+<main class="hidden" id="mainEl">
   <h2 id="title">Select or create a folder</h2>
   <div id="content"></div>
 </main>
 
-<script>
-// ---------- IndexedDB (works offline) ----------
-let db, current = null;
-const open = indexedDB.open('folder-organizer', 1);
-open.onupgradeneeded = e => {
-  const d = e.target.result;
-  d.createObjectStore('folders', {keyPath:'id', autoIncrement:true});
-  d.createObjectStore('items', {keyPath:'id', autoIncrement:true}).createIndex('folderId','folderId');
-};
-open.onsuccess = e => { db = e.target.result; renderFolders(); };
-open.onerror = () => alert('Storage unavailable. Try opening the file in Chrome/Edge/Firefox (not private mode).');
+<script type="module">
+// ======== PASTE YOUR SUPABASE VALUES HERE ========
+const SUPABASE_URL = "xspnkpecwjfwjzlmnsdm";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzcG5rcGVjd2pmd2p6bG1uc2RtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTExODkwNDAsImV4cCI6MjEwNjc2NTA0MH0.BlQob10fpnyqZdCN6J1Y7QfCXTjCjMBsK1cfXi78OeQ";
+// =================================================
 
-const req = r => new Promise((res,rej)=>{r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
-const store = (n,m='readonly') => db.transaction(n,m).objectStore(n);
-let dl = null;
-(async()=>{ try{ dl = await window.claude?.use('downloads'); }catch(e){ dl = null; } })();
-async function saveFile(filename, data){
-  if(!dl){ // normal browser download (GitHub Pages / local file)
-    const blob = data instanceof Blob ? data : new Blob([data],{type:'application/json'});
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove(); return;
-  }
-  try{ await dl.save({filename, data}); }catch(e){ if(e && e.code!=='declined') alert('Could not save: '+(e.message||e.code)); }
-}
-const b64ToBlob = d => { const [h,b]=d.split(','); const m=(h.match(/:(.*?);/)||[])[1]||'application/pdf'; const bin=atob(b); const u=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i); return new Blob([u],{type:m}); };
+import {createClient} from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 const $ = id => document.getElementById(id);
-const esc = s => s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+if(SUPABASE_KEY === "YOUR_ANON_OR_PUBLISHABLE_KEY"){ $('err').textContent = "Add your Supabase URL and key in index.html first."; throw new Error("config missing"); }
+const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
+let user = null, folders = [], items = [], current = null;
 
-// ---------- Folders ----------
-async function renderFolders(){
-  const folders = await req(store('folders').getAll());
-  const items = await req(store('items').getAll());
+// ---------- Auth ----------
+const creds = () => ({email:$('email').value.trim(), password:$('pass').value});
+const fail = e => { $('err').style.color='var(--danger)'; $('err').textContent = e.message; };
+$('signin').onclick = async () => { const {error} = await sb.auth.signInWithPassword(creds()); if(error) fail(error); };
+$('signup').onclick = async () => {
+  const {data, error} = await sb.auth.signUp(creds()); if(error) return fail(error);
+  if(!data.session){ $('err').style.color='var(--muted)'; $('err').textContent='Check your email to confirm, then sign in.'; }
+};
+$('pass').onkeydown = e => { if(e.key==='Enter') $('signin').click(); };
+$('signout').onclick = () => sb.auth.signOut();
+sb.auth.onAuthStateChange((_e, session) => {
+  user = session?.user || null;
+  $('auth').classList.toggle('hidden', !!user);
+  $('side').classList.toggle('hidden', !user);
+  $('mainEl').classList.toggle('hidden', !user);
+  if(user){ $('who').textContent = user.email; load(); } else { folders = items = []; current = null; }
+});
+document.addEventListener('visibilitychange', () => { if(!document.hidden && user) load(); });
+
+// ---------- Data ----------
+async function load(){
+  const [f, i] = await Promise.all([
+    sb.from('folders').select('*').order('created_at'),
+    sb.from('items').select('*').order('created_at')
+  ]);
+  if(f.error || i.error){ $('title').textContent = 'Could not load (offline?)'; return; }
+  folders = f.data; items = i.data; render();
+}
+const run = async p => { const {error} = await p; if(error) alert(error.message); await load(); };
+
+function render(){
+  if(current && !folders.find(f=>f.id===current)) current = null;
   $('folders').innerHTML = folders.map(f=>{
-    const n = items.filter(i=>i.folderId===f.id).length;
+    const n = items.filter(i=>i.folder_id===f.id).length;
     return `<div class="folder ${f.id===current?'active':''}" data-id="${f.id}">
       <span>📁 ${esc(f.name)} <small>(${n})</small></span>
-      <span><button class="del" data-ren="${f.id}" title="Rename" style="color:inherit">✎</button><button class="del" data-del="${f.id}" title="Delete" style="color:inherit">✕</button></span></div>`;
+      <span><button class="del" data-ren="${f.id}" style="color:inherit">✎</button><button class="del" data-del="${f.id}" style="color:inherit">✕</button></span></div>`;
   }).join('') || '<div class="empty">No folders yet</div>';
-  if(current) renderItems();
-}
-$('addFolder').onclick = async () => {
-  const name = $('newFolder').value.trim(); if(!name) return;
-  current = await req(store('folders','readwrite').add({name}));
-  $('newFolder').value=''; renderFolders();
-};
-$('newFolder').onkeydown = e => { if(e.key==='Enter') $('addFolder').click(); };
-$('folders').onclick = async e => {
-  const t = e.target;
-  if(t.dataset.del){
-    e.stopPropagation();
-    if(!confirm('Delete this folder and everything inside?')) return;
-    const id = +t.dataset.del;
-    const items = await req(store('items').index('folderId').getAllKeys(id));
-    const s = store('items','readwrite'); items.forEach(k=>s.delete(k));
-    await req(store('folders','readwrite').delete(id));
-    if(current===id){current=null;$('title').textContent='Select or create a folder';$('content').innerHTML='';}
-    return renderFolders();
-  }
-  if(t.dataset.ren){
-    e.stopPropagation();
-    const f = await req(store('folders').get(+t.dataset.ren));
-    const name = prompt('Rename folder', f.name); if(!name) return;
-    f.name = name.trim(); await req(store('folders','readwrite').put(f));
-    return renderFolders();
-  }
-  const el = t.closest('.folder'); if(el){ current = +el.dataset.id; renderFolders(); }
-};
-
-// ---------- Items ----------
-async function renderItems(){
-  const f = await req(store('folders').get(current)); if(!f) return;
-  const items = await req(store('items').index('folderId').getAll(current));
+  const f = folders.find(x=>x.id===current);
+  if(!f){ $('title').textContent = 'Select or create a folder'; $('content').innerHTML = ''; return; }
   $('title').textContent = '📁 ' + f.name;
+  const keep = ['iTitle','iLink'].map(id => $(id)?.value || '');
+  const list = items.filter(i=>i.folder_id===current);
   $('content').innerHTML = `
     <div class="add">
       <input type="text" id="iTitle" placeholder="Title">
@@ -127,60 +123,75 @@ async function renderItems(){
       <button class="ghost" id="pickPdf">Attach PDF</button>
       <input type="file" id="pdfFile" accept="application/pdf" multiple hidden>
     </div>
-    ${items.length ? `<table><thead><tr><th>Title</th><th>Link / PDF</th><th></th></tr></thead><tbody>
-      ${items.map(i=>`<tr>
-        <td>${esc(i.title)}</td>
+    ${list.length ? `<table><thead><tr><th>Title</th><th>Link / PDF</th><th></th></tr></thead><tbody>
+      ${list.map(i=>`<tr><td>${esc(i.title)}</td>
         <td>${i.type==='pdf'
-          ? `<span class="badge">PDF</span><a data-open="${i.id}">${esc(i.fileName)}</a> · <a data-dl="${i.id}">download</a>`
+          ? `<span class="badge">PDF</span><a data-open="${i.id}">${esc(i.file_name)}</a> · <a data-dl="${i.id}">download</a>`
           : `<span class="badge">LINK</span><a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.url)}</a>`}</td>
-        <td><button class="del" data-edit="${i.id}" style="color:var(--muted)">✎</button><button class="del" data-rm="${i.id}">✕</button></td>
-      </tr>`).join('')}</tbody></table>` : '<div class="empty">This folder is empty. Add a link or attach a PDF.</div>'}`;
+        <td><button class="del" data-edit="${i.id}" style="color:var(--muted)">✎</button><button class="del" data-rm="${i.id}">✕</button></td></tr>`).join('')}
+      </tbody></table>` : '<div class="empty">This folder is empty. Add a link or attach a PDF.</div>'}`;
+  $('iTitle').value = keep[0]; $('iLink').value = keep[1];
+}
 
-  $('addLink').onclick = async () => {
+// ---------- Actions ----------
+$('addFolder').onclick = async () => {
+  const name = $('newFolder').value.trim(); if(!name) return;
+  const {data, error} = await sb.from('folders').insert({name}).select().single();
+  if(error) return alert(error.message);
+  current = data.id; $('newFolder').value = ''; load();
+};
+$('newFolder').onkeydown = e => { if(e.key==='Enter') $('addFolder').click(); };
+
+$('folders').onclick = async e => {
+  const t = e.target;
+  if(t.dataset.del){
+    e.stopPropagation();
+    if(!confirm('Delete this folder and everything inside?')) return;
+    const paths = items.filter(i=>i.folder_id===t.dataset.del && i.file_path).map(i=>i.file_path);
+    if(paths.length) await sb.storage.from('pdfs').remove(paths);
+    return run(sb.from('folders').delete().eq('id', t.dataset.del));
+  }
+  if(t.dataset.ren){
+    e.stopPropagation();
+    const f = folders.find(x=>x.id===t.dataset.ren), n = prompt('Rename folder', f.name);
+    if(n && n.trim()) run(sb.from('folders').update({name:n.trim()}).eq('id', f.id));
+    return;
+  }
+  const el = t.closest('.folder'); if(el){ current = el.dataset.id; render(); }
+};
+
+const signed = async (i, opts) => (await sb.storage.from('pdfs').createSignedUrl(i.file_path, 3600, opts)).data?.signedUrl;
+$('content').onclick = async e => {
+  const t = e.target, find = id => items.find(i=>i.id===id);
+  if(t.id==='addLink'){
     let url = $('iLink').value.trim(); if(!url) return;
     if(!/^[a-z]+:\/\//i.test(url)) url = 'https://' + url;
     const title = $('iTitle').value.trim() || url;
-    await req(store('items','readwrite').add({folderId:current,type:'link',title,url}));
-    renderFolders();
-  };
-  $('pickPdf').onclick = () => $('pdfFile').click();
-  $('pdfFile').onchange = async e => {
-    const typed = $('iTitle').value.trim();
-    for(const file of e.target.files){
-      const title = (e.target.files.length===1 && typed) || file.name.replace(/\.pdf$/i,'');
-      await req(store('items','readwrite').add({folderId:current,type:'pdf',title,fileName:file.name,blob:file}));
-    }
-    renderFolders();
-  };
-}
-$('content').onclick = async e => {
-  const t = e.target;
-  const get = id => req(store('items').get(+id));
-  if(t.dataset.open){ const i = await get(t.dataset.open); const w = window.open(URL.createObjectURL(i.blob),'_blank'); if(!w) saveFile(i.fileName, i.blob); }
-  if(t.dataset.dl){ const i = await get(t.dataset.dl); saveFile(i.fileName, i.blob); }
-  if(t.dataset.rm){ if(confirm('Remove this item?')){ await req(store('items','readwrite').delete(+t.dataset.rm)); renderFolders(); } }
-  if(t.dataset.edit){ const i = await get(t.dataset.edit); const n = prompt('Edit title', i.title); if(n){ i.title=n.trim(); await req(store('items','readwrite').put(i)); renderFolders(); } }
-};
-
-// ---------- Backup (JSON, PDFs embedded as base64) ----------
-const toB64 = b => new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(b)});
-$('exportBtn').onclick = async () => {
-  const folders = await req(store('folders').getAll());
-  const items = await req(store('items').getAll());
-  for(const i of items) if(i.blob){ i.data = await toB64(i.blob); delete i.blob; }
-  saveFile('folder-organizer-backup.json', JSON.stringify({folders,items}));
-};
-$('importBtn').onclick = () => $('importFile').click();
-$('importFile').onchange = async e => {
-  const data = JSON.parse(await e.target.files[0].text());
-  const map = {};
-  for(const f of data.folders){ const old=f.id; delete f.id; map[old] = await req(store('folders','readwrite').add(f)); }
-  for(const i of data.items){
-    delete i.id; i.folderId = map[i.folderId];
-    if(i.data){ i.blob = b64ToBlob(i.data); delete i.data; }
-    await req(store('items','readwrite').add(i));
+    $('iTitle').value = $('iLink').value = '';
+    run(sb.from('items').insert({folder_id:current, type:'link', title, url}));
   }
-  renderFolders();
+  if(t.id==='pickPdf') $('pdfFile').click();
+  if(t.dataset.open){ const w = window.open('', '_blank'); const u = await signed(find(t.dataset.open)); if(u && w) w.location = u; else if(u) location.href = u; else w?.close(); }
+  if(t.dataset.dl){ const i = find(t.dataset.dl); const u = await signed(i, {download:i.file_name}); if(u){ const a=document.createElement('a'); a.href=u; document.body.appendChild(a); a.click(); a.remove(); } }
+  if(t.dataset.rm && confirm('Remove this item?')){
+    const i = find(t.dataset.rm);
+    if(i.file_path) await sb.storage.from('pdfs').remove([i.file_path]);
+    run(sb.from('items').delete().eq('id', i.id));
+  }
+  if(t.dataset.edit){ const i = find(t.dataset.edit), n = prompt('Edit title', i.title); if(n && n.trim()) run(sb.from('items').update({title:n.trim()}).eq('id', i.id)); }
+};
+$('content').onchange = async e => {
+  if(e.target.id!=='pdfFile') return;
+  const files = [...e.target.files], typed = $('iTitle').value.trim();
+  for(const file of files){
+    const path = `${user.id}/${crypto.randomUUID()}.pdf`;
+    const up = await sb.storage.from('pdfs').upload(path, file, {contentType:'application/pdf'});
+    if(up.error){ alert(`${file.name}: ${up.error.message}`); continue; }
+    const title = (files.length===1 && typed) || file.name.replace(/\.pdf$/i,'');
+    const {error} = await sb.from('items').insert({folder_id:current, type:'pdf', title, file_name:file.name, file_path:path});
+    if(error) alert(error.message);
+  }
+  $('iTitle').value = ''; load();
 };
 if('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
